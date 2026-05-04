@@ -7,4 +7,4 @@ Algoritmo para identificar SABs y optimizar su asignación
 
 ## 3. Criterio de SABs
 
-## 4. Algoritmo de optimización de complejidad
+## 4. Diseño de SAB
