@@ -1,0 +1,258 @@
+#%%
+# -------------------------------------------------------------------------------------------------------------------- #
+# ---------------------------------------- LIBRERIAS Y DIRECTORIOS NECESARIOS ---------------------------------------- #
+# -------------------------------------------------------------------------------------------------------------------- #
+
+import itertools
+import warnings
+import re
+import os
+import pandas as pd
+import numpy as np
+import shapely
+from shapely.geometry import box, Polygon
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import itertools
+from itertools import product
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.patches import Circle
+import geopy.distance
+from geopy.distance import geodesic
+from shapely.wkt import loads
+import pickle
+from shapely.geometry import Polygon, Point, LineString, box, MultiLineString 
+from shapely.ops import nearest_points
+from shapely.geometry import Polygon, MultiPolygon
+from shapely.ops import unary_union
+from datetime import datetime
+import shap
+import time
+import seaborn as sns
+import gc
+import ast
+import math
+import time
+import networkx as nx
+from shapely.ops import unary_union
+from shapely.wkt import loads
+from shapely.geometry import Point
+from sklearn.cluster import DBSCAN
+from collections import Counter
+
+start_time = time.time()
+
+
+### DIRECTORIOS - ACC Madrid Norte
+PATH_TRAFICO = 'F:\\Users\\Lai\\Datos\\2. bloque complejidad\\Datos\\DATASET ENTRADA PREDICCIONES\\Junio2022\\'
+PATH_SECTOR_DATA = 'F:\\Users\\Lai\\Datos\\1. bloque prediccion\\datos\\ACC Madrid Norte\\Sector Data\\LECMCTAN\\'
+PATH_flujos = 'F:\\Users\\Lai\\original\\2. bloque complejidad\\Datos\\MATRIZ DE INTERACCION DE FLUJOS\\'
+PATH_resultados = 'F:\\Users\\Lai\\Datos\\3. bloque optimizacion\\Resultados analisis flujo celda\\Junio2022\\test\\'
+PATH_TRAFICO_CELDA = 'F:\\Users\\Lai\\Datos\\3. bloque optimizacion\\Datos de entrada eCOMMET\\mallado_20x20\\'
+PATH_bordes = 'F:\\Users\\Lai\\Datos\\3. bloque optimizacion\\Resultados analisis flujo celda\\'
+PATH_sabs = 'F:\\Users\\Lai\\Datos\\3. bloque optimizacion\\Definición de sabs\\'
+PATH_mallado = 'F:\\Users\\Lai\\Datos\\3. bloque optimizacion\\Resultados analisis flujo celda\\'
+
+### Parámetros de estudio
+
+# configuración de estudio
+configuracion_estudio = 'CNF5A'
+
+# Día seleccionado
+# fecha_sel = input("Introduce un día del junio de 2022 (2022-06-DD): ")
+fecha_sel = 1
+fecha_sel = f"{fecha_sel:02d}"
+
+# Tamaño de celda en nm
+cell_size_nm = 20
+# cell_size_nm = input("Introduce el tamaño de celda en NM (ej. 20): ")
+
+#%%
+# -------------------------------------------------------------------------------------------------------------------- #
+# -------------------------------- IMPORTACIÓN DE DATASETS DEL ANÁLISIS A NIVEL CELDA -------------------------------- #
+# -------------------------------------------------------------------------------------------------------------------- #
+
+## -------------------------------------------------------------------------------------------------------------------- #
+
+# 1. Cargar Datos y Parsear Geometrías
+
+df_flows = pd.read_pickle(PATH_resultados + f'dataset_celdas_por_flujo_{fecha_sel}_filtrado.pkl')
+df_cells = pd.read_pickle(PATH_resultados + f'dataset_flujos_por_celda_{fecha_sel}_filtrado.pkl')
+
+DF_info_conf = pd.read_pickle(PATH_sabs + f'{configuracion_estudio}_DF_info_conf.pkl')
+
+df_mallado = pd.read_pickle(PATH_mallado + f'Mallado_{configuracion_estudio}_gdf_cells.pkl')
+
+gdf_mallado = gpd.GeoDataFrame(df_mallado, geometry='Polygon')
+gdf_mallado = gdf_mallado.rename_geometry('geometry')
+
+#%%
+
+df_flows['geometry'] = df_flows['Line']
+
+# 2. Encontrar Puntos de Cruce Geométrico Exacto
+intersections = []
+lines = df_flows['geometry'].dropna().tolist()
+flow_ids = df_flows['Clave_Flujo'].dropna().tolist()
+
+line_intersections = []
+for i in range(len(lines)):
+    for j in range(i + 1, len(lines)):
+        if lines[i].intersects(lines[j]):
+            inter = lines[i].intersection(lines[j])
+            if inter.geom_type == 'Point':
+                intersections.append((inter.x, inter.y))
+                line_intersections.append((flow_ids[i], flow_ids[j], inter.x, inter.y))
+            elif inter.geom_type == 'MultiPoint':
+                for p in inter.geoms:
+                    intersections.append((p.x, p.y))
+                    line_intersections.append((flow_ids[i], flow_ids[j], p.x, p.y))
+
+
+# 3. Agrupar puntos (Clustering) y calcular densidad y polígonos
+pts = np.array(intersections)
+clustering = DBSCAN(eps=0.075, min_samples=1).fit(pts) 
+
+labels = clustering.labels_
+cluster_centers = {
+    lbl: pts[labels == lbl].mean(axis=0) 
+    for lbl in set(labels)
+}
+
+cluster_counts = Counter(labels)
+
+# --- NUEVO: Calcular el polígono (envolvente convexa) de cada cluster ---
+cluster_polygons = {}
+from shapely.geometry import MultiPoint
+
+for label, centroid in cluster_centers.items():
+    cluster_points = pts[labels == label]
+    
+    # Si hay 1 o 2 puntos, un Convex Hull es un punto o una línea. 
+    # Usamos buffer() para inflarlo y convertirlo en un polígono visible.
+    if len(cluster_points) < 3:
+        poly = MultiPoint(cluster_points).buffer(0.015)
+    else:
+        # Envolvente convexa para adaptar la forma, más un buffer mínimo para estética
+        poly = MultiPoint(cluster_points).convex_hull.buffer(0.005)
+        
+    cluster_polygons[label] = poly
+
+flow_to_clusters = {fid: [] for fid in flow_ids}
+for (fid1, fid2, x, y), label in zip(line_intersections, labels):
+    flow_to_clusters[fid1].append((label, x, y))
+    flow_to_clusters[fid2].append((label, x, y))
+
+# Crear grafo con NetworkX asignando pesos y el polígono a los nodos
+G = nx.Graph()
+for label, centroid in cluster_centers.items():
+    weight = cluster_counts[label]
+    poly = cluster_polygons[label]
+    G.add_node(label, pos=(centroid[0], centroid[1]), weight=weight, polygon=poly)
+
+for fid, points in flow_to_clusters.items():
+    if len(points) > 1:
+        line_idx = flow_ids.index(fid)
+        start_pt = Point(lines[line_idx].coords[0])
+        sorted_points = sorted(points, key=lambda p: start_pt.distance(Point(p[1], p[2])))
+        
+        for i in range(len(sorted_points) - 1):
+            n1, n2 = sorted_points[i][0], sorted_points[i+1][0]
+            if n1 != n2:
+                G.add_edge(n1, n2)
+
+# 4. Dibujar Grafo con Nodos Ponderados (Escala Atenuada)
+fig, ax = plt.subplots(figsize=(14, 9))
+pos = nx.get_node_attributes(G, 'pos')
+weights = nx.get_node_attributes(G, 'weight')
+
+# --- AQUÍ SE APLICA LA ATENUACIÓN ---
+# Usamos np.sqrt() para que el crecimiento del punto no sea lineal.
+# 30 es el tamaño base, 60 es el multiplicador.
+node_sizes = [10 + (np.sqrt(weights[n]) * 60) for n in G.nodes()]
+
+# Dibujar la red
+nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color='purple', alpha=0.8, edgecolors='black', ax=ax)
+nx.draw_networkx_edges(G, pos, edge_color='gray', alpha=0.5, ax=ax)
+
+gdf_mallado.plot(ax=ax, color='lightgray', edgecolor='white', linewidth=0.5, alpha=0.6)
+
+# Configurar el lienzo
+ax.set_title('Grafo Topológico de Intersecciones (Tamaño Atenuado)', fontsize=16)
+plt.axis('on')
+ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
+ax.set_xlabel('Longitud')
+ax.set_ylabel('Latitud')
+
+# Crear leyenda manual para reflejar la escala matemática
+l1 = plt.scatter([],[], s=30 + np.sqrt(1)*60, color='purple', edgecolors='black', alpha=0.8, label='1 Intersección')
+l2 = plt.scatter([],[], s=30 + np.sqrt(5)*60, color='purple', edgecolors='black', alpha=0.8, label='5 Intersecciones')
+l3 = plt.scatter([],[], s=30 + np.sqrt(15)*60, color='purple', edgecolors='black', alpha=0.8, label='15+ Intersecciones')
+plt.legend(handles=[l1, l2, l3], loc='upper right', title="Nivel de Conflicto")
+
+# Guardar la imagen localmente
+plt.savefig('grafo_topologico_pesos_atenuado.png', bbox_inches='tight')
+plt.show()
+plt.close()
+
+
+# 5. Dibujar Grafo Filtrado (Zonas Críticas > 15 interacciones)
+
+
+# Identificar los nodos que cumplen la condición
+nodos_criticos = [n for n, datos in G.nodes(data=True) if datos['weight'] > 25]
+G_critico = G.subgraph(nodos_criticos)
+
+fig, ax = plt.subplots(figsize=(14, 9))
+pos_critica = nx.get_node_attributes(G_critico, 'pos')
+poligonos_critica = nx.get_node_attributes(G_critico, 'polygon')
+weights_critica = nx.get_node_attributes(G_critico, 'weight')
+
+# 1. Dibujar el mallado de fondo
+gdf_mallado.plot(ax=ax, color='lightgray', edgecolor='white', linewidth=0.5, alpha=0.6, zorder=1)
+
+# 2. Dibujar contornos de sectores
+for index, row in DF_info_conf.iterrows():
+    poly = row['Contorno Sector']
+    x, y = poly.exterior.xy
+    ax.fill(x, y, alpha=0.15, edgecolor='black', linewidth=1.5, zorder=2)
+    ax.text(poly.centroid.x, poly.centroid.y, row['SECTOR_ID'], 
+             fontsize=10, ha='center', weight='bold', alpha=0.6, zorder=3)
+
+# 3. Dibujar aristas (líneas del grafo)
+nx.draw_networkx_edges(G_critico, pos_critica, edge_color='gray', alpha=0.5, ax=ax)
+
+# 4. --- NUEVO: Dibujar los polígonos envolventes ---
+for node in G_critico.nodes():
+    poly = poligonos_critica[node]
+    center = pos_critica[node]
+    
+    # Extraer los bordes del polígono
+    x_poly, y_poly = poly.exterior.xy
+    
+    # Rellenar la forma
+    ax.fill(x_poly, y_poly, color='red', alpha=0.4, edgecolor='darkred', linewidth=1.5, zorder=4)
+
+    # Escribir el número de interacciones en el centro
+    ax.text(center[0], center[1], str(weights_critica[node]), 
+            color='white', fontsize=9, ha='center', va='center', weight='bold', zorder=5)
+
+# Configurar el lienzo
+ax.set_title('Zonas Críticas: Polígonos de Distribución de Intersecciones (> 50)', fontsize=16)
+plt.axis('on')
+ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
+ax.set_xlabel('Longitud')
+ax.set_ylabel('Latitud')
+
+# Leyenda adaptada
+from matplotlib.patches import Patch
+poligono_leyenda = Patch(facecolor='red', edgecolor='darkred', alpha=0.4, label='Área de distribución de cruces')
+plt.legend(handles=[poligono_leyenda], loc='upper right')
+
+# Guardar y mostrar
+plt.savefig('grafo_topologico_zonas_criticas_poligonos.png', bbox_inches='tight')
+plt.show()
+plt.close()
+
+# %%
