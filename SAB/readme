@@ -1,1 +1,7 @@
 Codigos para identificar los sabs
+1. Forma_SAB: codigo para dibujar SAB del 1º tipo y del 2º tipo pero de la 1º opción (baja complejidad)
+2. Forma_SAB_nuevo: codigo para dibujar ell 1º tipo de SAB y el 2º tipo de SAB pero de la 1º opción (alta complejidad)
+3. SAB_2_nuevo: codigo para diseñar 2º tipo de SAB de la 2º opción (alta complejidad)
+4. SAB_tipo1: codigo para diseñar 1º tipo de SAB
+5. SAB_tipo2: codigo para diseñar 2º tipo de SAB de la 1º opción (baja complejidad)
+6. Vertical_SAB: codigo para diseñar los SAB verticales
